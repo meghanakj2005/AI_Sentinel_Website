@@ -10,10 +10,19 @@ from flask import Flask, render_template, request, redirect, url_for, flash, sen
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
 from utils.predictor import predict_from_file, predict_dataframe
-from sniffer import start_sniffing
-from live_features import build_live_feature_row
+
+try:
+    from sniffer import start_sniffing
+    from live_features import build_live_feature_row
+    SNIFFER_IMPORT_OK = True
+except Exception:
+    start_sniffing = None
+    build_live_feature_row = None
+    SNIFFER_IMPORT_OK = False
+
 
 app = Flask(__name__)
 app.secret_key = "ai_sentinel_secret"
@@ -27,6 +36,11 @@ DB_PATH = os.path.join(INSTANCE_FOLDER, "users.db")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(INSTANCE_FOLDER, exist_ok=True)
+
+IS_RENDER = os.environ.get("RENDER") is not None
+
+# Keep large dashboard data on server side instead of cookie session
+DASHBOARD_STORE = {}
 
 LIVE_STATE = {
     "file_path": None,
@@ -68,11 +82,18 @@ init_db()
 # =========================
 # START MOBILE TRAFFIC SNIFFER
 # =========================
-threading.Thread(
-    target=start_sniffing,
-    kwargs={"interface": "Wi-Fi"},   # change if needed
-    daemon=True
-).start()
+if (not IS_RENDER) and SNIFFER_IMPORT_OK and start_sniffing is not None:
+    try:
+        threading.Thread(
+            target=start_sniffing,
+            kwargs={"interface": "Wi-Fi"},
+            daemon=True
+        ).start()
+        print("Sniffer thread started in local mode.")
+    except Exception as e:
+        print(f"Sniffer thread failed to start: {e}")
+else:
+    print("Sniffer disabled on Render/cloud mode.")
 
 
 # =========================
@@ -86,6 +107,17 @@ def login_required(fn):
             return redirect(url_for("login"))
         return fn(*args, **kwargs)
     return wrapper
+
+
+# =========================
+# STORE HELPERS
+# =========================
+def get_user_store_key():
+    return session.get("user_email", "anonymous")
+
+
+def get_dashboard_data_for_user():
+    return DASHBOARD_STORE.get(get_user_store_key())
 
 
 # =========================
@@ -326,16 +358,24 @@ def upload():
             flash("Please upload a valid CSV file.")
             return redirect(url_for("upload"))
 
-        save_path = os.path.join(UPLOAD_FOLDER, file.filename)
-        file.save(save_path)
+        filename = secure_filename(file.filename)
+        if not filename.lower().endswith(".csv"):
+            flash("Only CSV files are allowed.")
+            return redirect(url_for("upload"))
+
+        save_path = os.path.join(UPLOAD_FOLDER, filename)
 
         try:
+            file.save(save_path)
+
             full_result_df, display_result_df = predict_from_file(save_path)
 
             csv_path = os.path.join(OUTPUT_FOLDER, "prediction_results.csv")
             full_result_df.to_csv(csv_path, index=False)
 
-            session["dashboard_data"] = build_dashboard_data(full_result_df, display_result_df)
+            dashboard_data = build_dashboard_data(full_result_df, display_result_df)
+
+            DASHBOARD_STORE[get_user_store_key()] = dashboard_data
 
             LIVE_STATE["file_path"] = save_path
             LIVE_STATE["cursor"] = 0
@@ -344,7 +384,7 @@ def upload():
             return redirect(url_for("dashboard"))
 
         except Exception as e:
-            flash(f"Error: {e}")
+            flash(f"Upload failed: {str(e)}")
             return redirect(url_for("upload"))
 
     return render_template("upload.html")
@@ -353,7 +393,7 @@ def upload():
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    data = session.get("dashboard_data")
+    data = get_dashboard_data_for_user()
     if not data:
         flash("Upload dataset first.")
         return redirect(url_for("upload"))
@@ -378,7 +418,7 @@ def dashboard():
 @app.route("/alerts")
 @login_required
 def alerts():
-    data = session.get("dashboard_data")
+    data = get_dashboard_data_for_user()
     if not data:
         flash("Upload dataset first.")
         return redirect(url_for("upload"))
@@ -489,68 +529,67 @@ def api_live_predict():
 @login_required
 def api_mobile_live():
     try:
-        live_df, sniffer_error = build_live_feature_row()
+        # =========================
+        # LOCAL REAL PACKET MODE ONLY
+        # =========================
+        if (not IS_RENDER) and SNIFFER_IMPORT_OK and build_live_feature_row is not None:
+            live_df, sniffer_error = build_live_feature_row()
+
+            if not sniffer_error and not live_df.empty:
+                live_df = live_df.copy()
+
+                if SIMULATION_STATE["attack_mode"]:
+                    if "src_bytes" in live_df.columns:
+                        live_df["src_bytes"] = live_df["src_bytes"] * 15
+                    if "dst_bytes" in live_df.columns:
+                        live_df["dst_bytes"] = live_df["dst_bytes"] * 12
+                    if "count" in live_df.columns:
+                        live_df["count"] = live_df["count"] + 20
+                    if "srv_count" in live_df.columns:
+                        live_df["srv_count"] = live_df["srv_count"] + 15
+                    if "tcp_count" in live_df.columns:
+                        live_df["tcp_count"] = live_df["tcp_count"] + 10
+
+                full_result_df, display_result_df = predict_dataframe(live_df)
+
+                if SIMULATION_STATE["attack_mode"] and not full_result_df.empty:
+                    full_result_df = full_result_df.copy()
+                    display_result_df = display_result_df.copy()
+
+                    full_result_df["predicted_class"] = "dos"
+                    full_result_df["confidence"] = 96.45
+                    full_result_df["threat_status"] = "Threat"
+
+                    display_result_df["predicted_class"] = "dos"
+                    display_result_df["confidence"] = 96.45
+                    display_result_df["threat_status"] = "Threat"
+
+                total_logs = len(full_result_df)
+                total_threats = int((full_result_df["threat_status"] == "Threat").sum())
+                total_safe = int((full_result_df["threat_status"] == "Normal").sum())
+
+                alerts = build_alerts(full_result_df)
+
+                threat_df = full_result_df[full_result_df["threat_status"] == "Threat"]
+                top_attack = (
+                    threat_df["predicted_class"].value_counts().idxmax()
+                    if not threat_df.empty else "normal"
+                )
+
+                return jsonify({
+                    "time": time.strftime("%H:%M:%S"),
+                    "mode": "real",
+                    "alerts": alerts,
+                    "rows": display_result_df.to_dict(orient="records"),
+                    "total_logs": total_logs,
+                    "total_threats": total_threats,
+                    "total_safe": total_safe,
+                    "top_attack": top_attack,
+                    "status_message": "Demo attack simulation active" if SIMULATION_STATE["attack_mode"] else "Real packet monitoring active"
+                })
 
         # =========================
-        # REAL PACKET MODE
-        # =========================
-        if not sniffer_error and not live_df.empty:
-            live_df = live_df.copy()
-
-            # DEMO ATTACK MODE
-            if SIMULATION_STATE["attack_mode"]:
-                if "src_bytes" in live_df.columns:
-                    live_df["src_bytes"] = live_df["src_bytes"] * 15
-                if "dst_bytes" in live_df.columns:
-                    live_df["dst_bytes"] = live_df["dst_bytes"] * 12
-                if "count" in live_df.columns:
-                    live_df["count"] = live_df["count"] + 20
-                if "srv_count" in live_df.columns:
-                    live_df["srv_count"] = live_df["srv_count"] + 15
-                if "tcp_count" in live_df.columns:
-                    live_df["tcp_count"] = live_df["tcp_count"] + 10
-
-            full_result_df, display_result_df = predict_dataframe(live_df)
-
-            # Force visible attack output for demo mode
-            if SIMULATION_STATE["attack_mode"] and not full_result_df.empty:
-                full_result_df = full_result_df.copy()
-                display_result_df = display_result_df.copy()
-
-                full_result_df["predicted_class"] = "dos"
-                full_result_df["confidence"] = 96.45
-                full_result_df["threat_status"] = "Threat"
-
-                display_result_df["predicted_class"] = "dos"
-                display_result_df["confidence"] = 96.45
-                display_result_df["threat_status"] = "Threat"
-
-            total_logs = len(full_result_df)
-            total_threats = int((full_result_df["threat_status"] == "Threat").sum())
-            total_safe = int((full_result_df["threat_status"] == "Normal").sum())
-
-            alerts = build_alerts(full_result_df)
-
-            threat_df = full_result_df[full_result_df["threat_status"] == "Threat"]
-            top_attack = (
-                threat_df["predicted_class"].value_counts().idxmax()
-                if not threat_df.empty else "normal"
-            )
-
-            return jsonify({
-                "time": time.strftime("%H:%M:%S"),
-                "mode": "real",
-                "alerts": alerts,
-                "rows": display_result_df.to_dict(orient="records"),
-                "total_logs": total_logs,
-                "total_threats": total_threats,
-                "total_safe": total_safe,
-                "top_attack": top_attack,
-                "status_message": "Demo attack simulation active" if SIMULATION_STATE["attack_mode"] else "Real packet monitoring active"
-            })
-
-        # =========================
-        # FALLBACK: UPLOADED FILE SIMULATION
+        # RENDER/CLOUD FALLBACK: USE UPLOADED FILE
         # =========================
         file_path = LIVE_STATE.get("file_path")
 
@@ -599,14 +638,14 @@ def api_mobile_live():
 
             return jsonify({
                 "time": time.strftime("%H:%M:%S"),
-                "mode": "simulation",
+                "mode": "simulation" if IS_RENDER else "file",
                 "alerts": alerts,
                 "rows": display_result_df.to_dict(orient="records"),
                 "total_logs": total_logs,
                 "total_threats": total_threats,
                 "total_safe": total_safe,
                 "top_attack": top_attack,
-                "status_message": "Demo attack simulation active" if SIMULATION_STATE["attack_mode"] else "Using uploaded data (live simulation)"
+                "status_message": "Demo attack simulation active" if SIMULATION_STATE["attack_mode"] else "Using uploaded data as live simulation"
             })
 
         # =========================
@@ -621,7 +660,7 @@ def api_mobile_live():
             "total_threats": 0,
             "total_safe": 0,
             "top_attack": "No data",
-            "status_message": "No packets and no uploaded file available"
+            "status_message": "Upload a dataset first. Real packet sniffing is disabled on Render."
         })
 
     except Exception as e:
@@ -659,7 +698,7 @@ def download_csv():
 @app.route("/download/pdf")
 @login_required
 def download_pdf():
-    data = session.get("dashboard_data")
+    data = get_dashboard_data_for_user()
     if not data:
         flash("Upload dataset first.")
         return redirect(url_for("upload"))
