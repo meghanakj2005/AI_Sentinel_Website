@@ -103,16 +103,17 @@ body {
 .login-wrap {
     min-height: 100vh;
     display: flex;
-    justify-content: flex-end;
-    align-items: flex-start;
-    padding: 120px 8% 40px 8%;
+    justify-content: center;
+    align-items: center;
+    padding: 24px;
 }
 
 .auth-panel {
     width: 100%;
     max-width: 520px;
     display: flex;
-    justify-content: flex-end;
+    justify-content: center;
+    align-items: center;
 }
 
 .auth-card-wrap {
@@ -126,6 +127,7 @@ body {
     border-radius: 26px;
     padding: 34px;
     box-shadow: 0 18px 45px rgba(0,0,0,0.35);
+    margin: 0 auto;
 }
 
 /* ---------- Cards ---------- */
@@ -787,11 +789,13 @@ a {
 
     .login-wrap {
         justify-content: center;
-        padding: 40px 24px 24px 24px;
+        align-items: center;
+        padding: 24px;
     }
 
     .auth-panel {
         justify-content: center;
+        align-items: center;
     }
 
     .nav-links {
@@ -807,6 +811,7 @@ a {
         align-items: flex-start;
     }
 }
+
 .attack-btn {
     background: linear-gradient(90deg, #1d3557, #244b74);
     border: 1px solid rgba(255,255,255,0.08);
