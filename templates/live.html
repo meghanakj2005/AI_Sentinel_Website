@@ -8,7 +8,7 @@
         </p>
     </div>
     <div class="hero-actions">
-        <span class="panel-tag" id="liveModeTag">Checking...</span>
+        <span class="panel-tag" id="liveModeTag">Realtime</span>
         <button class="btn attack-btn" id="toggleAttackBtn" type="button">Simulate Attack: OFF</button>
     </div>
 </div>
@@ -20,7 +20,7 @@
         <span class="stat-foot">Current capture window</span>
     </div>
 
-    <div class="card stat-card danger" id="threatCard">
+    <div class="card stat-card danger blink-card" id="threatCard">
         <p class="stat-label">Threats</p>
         <h2 id="metricThreats">0</h2>
         <span class="stat-foot">Suspicious detections</span>
@@ -45,7 +45,7 @@
         <span class="panel-tag">Realtime API</span>
     </div>
     <p>Last refresh: <strong id="liveTime">--:--:--</strong></p>
-    <p id="liveStatus" class="table-subtitle">Checking live monitoring service...</p>
+    <p id="liveStatus" class="table-subtitle">Waiting for live data...</p>
 </div>
 
 <div class="dashboard-grid">
@@ -87,15 +87,7 @@
             <h3>Live Alerts</h3>
             <span class="panel-tag">Mobile Feed</span>
         </div>
-        <div class="threat-feed" id="liveAlerts">
-            <div class="feed-item low">
-                <div class="feed-dot low"></div>
-                <div class="feed-content">
-                    <h4>Waiting for Data</h4>
-                    <p>Live monitoring is starting. Please wait...</p>
-                </div>
-            </div>
-        </div>
+        <div class="threat-feed" id="liveAlerts"></div>
     </div>
 </div>
 
@@ -127,7 +119,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 function escapeHtml(text) {
-    return String(text ?? "")
+    return String(text)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -149,8 +141,6 @@ const trendLabels = [];
 const packetSeries = [];
 const threatSeries = [];
 const safeSeries = [];
-
-let liveAvailable = true;
 
 const trafficTrendChart = new Chart(document.getElementById("trafficTrendChart"), {
     type: "line",
@@ -244,43 +234,9 @@ function pushTrendPoint(label, packets, threats, safe) {
     liveThreatSafeChart.update();
 }
 
-function setOfflineUI(message) {
-    liveAvailable = false;
-
-    document.getElementById("liveModeTag").textContent = "Cloud Mode";
-    document.getElementById("liveTime").textContent = "--:--:--";
-    document.getElementById("metricLogs").textContent = "0";
-    document.getElementById("metricThreats").textContent = "0";
-    document.getElementById("metricSafe").textContent = "0";
-    document.getElementById("metricTopAttack").textContent = "Unavailable";
-    document.getElementById("liveStatus").textContent = message;
-
-    document.getElementById("liveAlerts").innerHTML = `
-        <div class="feed-item medium">
-            <div class="feed-dot medium"></div>
-            <div class="feed-content">
-                <h4>Live Monitor Unavailable</h4>
-                <p>${escapeHtml(message)}</p>
-            </div>
-        </div>
-    `;
-
-    document.getElementById("liveMap").innerHTML = baseMapLabels() + `
-        <div class="map-center">Cloud Monitoring Limited</div>
-    `;
-
-    document.getElementById("liveTableBody").innerHTML = `
-        <tr>
-            <td colspan="8" style="text-align:center;">Live packet sniffing is unavailable on deployed cloud mode. Use uploaded logs or simulation mode.</td>
-        </tr>
-    `;
-}
-
 async function loadAttackStatus() {
     try {
         const res = await fetch("/api/attack-status");
-        if (!res.ok) throw new Error("HTTP " + res.status);
-
         const data = await res.json();
         const btn = document.getElementById("toggleAttackBtn");
 
@@ -291,13 +247,8 @@ async function loadAttackStatus() {
             btn.textContent = "Simulate Attack: OFF";
             btn.classList.remove("attack-on");
         }
-
-        btn.disabled = false;
     } catch (err) {
         console.error("Attack status error:", err);
-        const btn = document.getElementById("toggleAttackBtn");
-        btn.textContent = "Simulation Unavailable";
-        btn.disabled = true;
     }
 }
 
@@ -306,9 +257,6 @@ document.getElementById("toggleAttackBtn").addEventListener("click", async funct
         const res = await fetch("/api/toggle-attack", {
             method: "POST"
         });
-
-        if (!res.ok) throw new Error("HTTP " + res.status);
-
         const data = await res.json();
         const btn = document.getElementById("toggleAttackBtn");
 
@@ -323,7 +271,6 @@ document.getElementById("toggleAttackBtn").addEventListener("click", async funct
         loadMobileLive();
     } catch (err) {
         console.error("Toggle attack failed:", err);
-        document.getElementById("liveStatus").textContent = "Simulation toggle failed: " + err.message;
     }
 });
 
@@ -339,14 +286,7 @@ async function loadMobileLive() {
 
         const data = await res.json();
 
-        if (data.live_available === false) {
-            setOfflineUI(data.status_message || "Live monitoring is disabled in deployed cloud mode.");
-            return;
-        }
-
-        liveAvailable = true;
-
-        document.getElementById("liveModeTag").textContent = data.mode || "Realtime";
+        document.getElementById("liveModeTag").textContent = data.mode || "unknown";
         document.getElementById("liveTime").textContent = data.time || "--:--:--";
         document.getElementById("metricLogs").textContent = data.total_logs || 0;
         document.getElementById("metricThreats").textContent = data.total_threats || 0;
@@ -403,7 +343,7 @@ async function loadMobileLive() {
 
             mapBox.innerHTML += `
                 <div class="threat-node ${escapeHtml(alert.severity)}"
-                     style="left:${Number(alert.x) || 50}%; top:${Number(alert.y) || 50}%"
+                     style="left:${alert.x}%; top:${alert.y}%"
                      title="${escapeHtml(alert.title)} - ${escapeHtml(alert.message)}">
                     <span class="pulse"></span>
                     <span class="dot"></span>
@@ -411,34 +351,26 @@ async function loadMobileLive() {
             `;
         });
 
-        if (rows.length === 0) {
-            tableBody.innerHTML = `
+        rows.forEach(row => {
+            tableBody.innerHTML += `
                 <tr>
-                    <td colspan="8" style="text-align:center;">No live prediction rows available.</td>
+                    <td>${escapeHtml(row.duration ?? "")}</td>
+                    <td>${escapeHtml(row.src_bytes ?? "")}</td>
+                    <td>${escapeHtml(row.dst_bytes ?? "")}</td>
+                    <td>${escapeHtml(row.count ?? "")}</td>
+                    <td>${escapeHtml(row.srv_count ?? "")}</td>
+                    <td>${escapeHtml(row.predicted_class ?? "")}</td>
+                    <td>${escapeHtml(row.confidence ?? "")}</td>
+                    <td>${escapeHtml(row.threat_status ?? "")}</td>
                 </tr>
             `;
-        } else {
-            rows.forEach(row => {
-                tableBody.innerHTML += `
-                    <tr>
-                        <td>${escapeHtml(row.duration)}</td>
-                        <td>${escapeHtml(row.src_bytes)}</td>
-                        <td>${escapeHtml(row.dst_bytes)}</td>
-                        <td>${escapeHtml(row.count)}</td>
-                        <td>${escapeHtml(row.srv_count)}</td>
-                        <td>${escapeHtml(row.predicted_class)}</td>
-                        <td>${escapeHtml(row.confidence)}</td>
-                        <td>${escapeHtml(row.threat_status)}</td>
-                    </tr>
-                `;
-            });
-        }
+        });
 
         statusBox.textContent = data.status_message || "Live monitoring connected successfully.";
 
     } catch (err) {
         console.error("Mobile live fetch failed:", err);
-        setOfflineUI("Live monitoring API is not available on cloud deployment or failed to respond.");
+        statusBox.textContent = "Mobile live API error: " + err.message;
     }
 }
 
