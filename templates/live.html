@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+
 <div class="hero-strip">
     <div>
         <h1 class="dashboard-title">Mobile Network Live Monitor</h1>
@@ -7,9 +8,12 @@
             Real-time monitoring of mobile-generated network traffic captured through the laptop interface.
         </p>
     </div>
+
     <div class="hero-actions">
-        <span class="panel-tag" id="liveModeTag">Realtime</span>
-        <button class="btn attack-btn" id="toggleAttackBtn" type="button">Simulate Attack: OFF</button>
+        <span class="panel-tag" id="liveModeTag">unknown</span>
+        <button class="btn attack-btn" id="toggleAttackBtn" type="button">
+            Simulate Attack: OFF
+        </button>
     </div>
 </div>
 
@@ -101,6 +105,13 @@
         <table>
             <thead>
                 <tr>
+                    <th>Time</th>
+                    <th>Protocol</th>
+                    <th>Source IP</th>
+                    <th>Destination IP</th>
+                    <th>Src Port</th>
+                    <th>Dst Port</th>
+                    <th>Packet Len</th>
                     <th>Duration</th>
                     <th>Src Bytes</th>
                     <th>Dst Bytes</th>
@@ -119,7 +130,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
 function escapeHtml(text) {
-    return String(text)
+    return String(text ?? "")
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -354,14 +365,21 @@ async function loadMobileLive() {
         rows.forEach(row => {
             tableBody.innerHTML += `
                 <tr>
-                    <td>${escapeHtml(row.duration ?? "")}</td>
-                    <td>${escapeHtml(row.src_bytes ?? "")}</td>
-                    <td>${escapeHtml(row.dst_bytes ?? "")}</td>
-                    <td>${escapeHtml(row.count ?? "")}</td>
-                    <td>${escapeHtml(row.srv_count ?? "")}</td>
-                    <td>${escapeHtml(row.predicted_class ?? "")}</td>
-                    <td>${escapeHtml(row.confidence ?? "")}</td>
-                    <td>${escapeHtml(row.threat_status ?? "")}</td>
+                    <td>${escapeHtml(row.timestamp)}</td>
+                    <td>${escapeHtml(row.protocol_type)}</td>
+                    <td>${escapeHtml(row.src_ip)}</td>
+                    <td>${escapeHtml(row.dst_ip)}</td>
+                    <td>${escapeHtml(row.src_port)}</td>
+                    <td>${escapeHtml(row.dst_port)}</td>
+                    <td>${escapeHtml(row.packet_len)}</td>
+                    <td>${escapeHtml(row.duration)}</td>
+                    <td>${escapeHtml(row.src_bytes)}</td>
+                    <td>${escapeHtml(row.dst_bytes)}</td>
+                    <td>${escapeHtml(row.count)}</td>
+                    <td>${escapeHtml(row.srv_count)}</td>
+                    <td>${escapeHtml(row.predicted_class)}</td>
+                    <td>${escapeHtml(row.confidence)}</td>
+                    <td>${escapeHtml(row.threat_status)}</td>
                 </tr>
             `;
         });
@@ -379,4 +397,5 @@ loadMobileLive();
 setInterval(loadMobileLive, 5000);
 setInterval(loadAttackStatus, 5000);
 </script>
+
 {% endblock %}
