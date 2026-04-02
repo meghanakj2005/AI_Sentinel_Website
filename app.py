@@ -26,7 +26,6 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 os.makedirs(INSTANCE_FOLDER, exist_ok=True)
 
-# Render-safe live state
 LIVE_STATE = {
     "file_path": None,
     "cursor": 0,
@@ -38,7 +37,7 @@ SIMULATION_STATE = {
 }
 
 MAX_UPLOAD_ROWS = 2000
-MAX_LIVE_ROWS = 500
+MAX_LIVE_SIM_ROWS = 1000
 
 
 # =========================
@@ -114,7 +113,7 @@ def save_json(path, data):
 
 
 def load_json(path, default=None):
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return default
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -388,23 +387,19 @@ def upload():
         file.save(save_path)
 
         try:
-            # Load only limited rows to prevent memory crash on Render free tier
             df = pd.read_csv(save_path, low_memory=False, nrows=MAX_UPLOAD_ROWS)
 
             full_result_df, display_result_df = predict_dataframe(df)
 
-            # Save prediction CSV
             csv_path = os.path.join(OUTPUT_FOLDER, "prediction_results.csv")
             full_result_df.to_csv(csv_path, index=False)
 
-            # Save compact dashboard data to disk instead of storing huge session object
             dashboard_data = build_dashboard_data(full_result_df, display_result_df)
             dashboard_json_path = user_data_path(session["user_email"], "dashboard.json")
             save_json(dashboard_json_path, dashboard_data)
 
-            # Save limited live source file for simulation mode
             live_csv_path = user_data_path(session["user_email"], "live_source.csv")
-            df.head(MAX_LIVE_ROWS).to_csv(live_csv_path, index=False)
+            df.head(MAX_LIVE_SIM_ROWS).to_csv(live_csv_path, index=False)
 
             LIVE_STATE["file_path"] = live_csv_path
             LIVE_STATE["cursor"] = 0
