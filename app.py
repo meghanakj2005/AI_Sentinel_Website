@@ -3,6 +3,7 @@ import os
 import json
 import sqlite3
 import time
+import threading
 from functools import wraps
 
 import pandas as pd
@@ -12,6 +13,8 @@ from reportlab.pdfgen import canvas
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from utils.predictor import predict_dataframe
+from live_features import build_live_feature_row
+from sniffer import start_sniffing
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "ai_sentinel_secret")
@@ -36,13 +39,13 @@ SIMULATION_STATE = {
     "attack_mode": False
 }
 
-MAX_UPLOAD_ROWS = 2000
+MAX_UPLOAD_ROWS = 5000
 MAX_LIVE_SIM_ROWS = 1000
 
+ENABLE_SNIFFER = os.getenv("ENABLE_SNIFFER", "false").lower() == "true"
+SNIFFER_INTERFACE = os.getenv("SNIFFER_INTERFACE", "Wi-Fi")
 
-# =========================
-# DATABASE
-# =========================
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -65,10 +68,14 @@ def init_db():
 
 init_db()
 
+if ENABLE_SNIFFER:
+    threading.Thread(
+        target=start_sniffing,
+        kwargs={"interface": SNIFFER_INTERFACE},
+        daemon=True
+    ).start()
 
-# =========================
-# AUTH
-# =========================
+
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
@@ -79,9 +86,6 @@ def login_required(fn):
     return wrapper
 
 
-# =========================
-# HELPERS
-# =========================
 def heat_class(score):
     if score >= 90:
         return "heat-high"
@@ -287,9 +291,27 @@ def build_dashboard_data(full_df, display_df):
     }
 
 
-# =========================
-# ROUTES
-# =========================
+def merge_live_metadata(display_result_df, original_live_df):
+    merged = display_result_df.copy()
+    extra_cols = [
+        "timestamp", "src_ip", "dst_ip", "src_port", "dst_port",
+        "protocol_type", "packet_len"
+    ]
+
+    for col in extra_cols:
+        if col in original_live_df.columns:
+            merged[col] = original_live_df[col].values
+
+    preferred_order = [
+        "timestamp", "protocol_type", "src_ip", "dst_ip", "src_port", "dst_port",
+        "packet_len", "duration", "src_bytes", "dst_bytes", "count", "srv_count",
+        "predicted_class", "confidence", "threat_status"
+    ]
+
+    final_cols = [c for c in preferred_order if c in merged.columns]
+    return merged[final_cols]
+
+
 @app.route("/")
 def index():
     if "user_email" in session:
@@ -468,86 +490,129 @@ def live():
 @login_required
 def toggle_attack():
     SIMULATION_STATE["attack_mode"] = not SIMULATION_STATE["attack_mode"]
-    return jsonify({
-        "attack_mode": SIMULATION_STATE["attack_mode"]
-    })
+    return jsonify({"attack_mode": SIMULATION_STATE["attack_mode"]})
 
 
 @app.route("/api/attack-status")
 @login_required
 def attack_status():
-    return jsonify({
-        "attack_mode": SIMULATION_STATE["attack_mode"]
-    })
+    return jsonify({"attack_mode": SIMULATION_STATE["attack_mode"]})
 
 
 @app.route("/api/mobile-live")
 @login_required
 def api_mobile_live():
     try:
+        live_df, sniffer_error = build_live_feature_row()
+
+        if ENABLE_SNIFFER and not sniffer_error and not live_df.empty:
+            original_live_df = live_df.copy()
+
+            full_result_df, display_result_df = predict_dataframe(live_df)
+
+            if SIMULATION_STATE["attack_mode"] and not full_result_df.empty:
+                full_result_df = full_result_df.copy()
+                display_result_df = display_result_df.copy()
+
+                full_result_df["predicted_class"] = "dos"
+                full_result_df["confidence"] = 96.45
+                full_result_df["threat_status"] = "Threat"
+
+                display_result_df["predicted_class"] = "dos"
+                display_result_df["confidence"] = 96.45
+                display_result_df["threat_status"] = "Threat"
+
+            display_result_df = merge_live_metadata(display_result_df, original_live_df)
+
+            alert_df = original_live_df.copy()
+            alert_df["predicted_class"] = full_result_df["predicted_class"].values
+            alert_df["confidence"] = full_result_df["confidence"].values
+            alert_df["threat_status"] = full_result_df["threat_status"].values
+
+            total_logs = len(full_result_df)
+            total_threats = int((full_result_df["threat_status"] == "Threat").sum())
+            total_safe = int((full_result_df["threat_status"] == "Normal").sum())
+
+            alerts = build_alerts(alert_df)
+
+            threat_df = full_result_df[full_result_df["threat_status"] == "Threat"]
+            top_attack = threat_df["predicted_class"].value_counts().idxmax() if not threat_df.empty else "normal"
+
+            return jsonify({
+                "time": time.strftime("%H:%M:%S"),
+                "mode": "real",
+                "alerts": alerts,
+                "rows": display_result_df.to_dict(orient="records"),
+                "total_logs": total_logs,
+                "total_threats": total_threats,
+                "total_safe": total_safe,
+                "top_attack": top_attack,
+                "status_message": "Demo attack simulation active" if SIMULATION_STATE["attack_mode"] else "Real packet monitoring active"
+            })
+
         file_path = session.get("live_csv_path") or LIVE_STATE.get("file_path")
 
-        if not file_path or not os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
+            df = pd.read_csv(file_path, low_memory=False)
+
+            start = LIVE_STATE.get("cursor", 0)
+            chunk_size = LIVE_STATE.get("chunk_size", 20)
+            end = start + chunk_size
+
+            chunk_df = df.iloc[start:end].copy()
+
+            if chunk_df.empty:
+                LIVE_STATE["cursor"] = 0
+                chunk_df = df.iloc[0:chunk_size].copy()
+                end = chunk_size
+
+            LIVE_STATE["cursor"] = end
+
+            full_result_df, display_result_df = predict_dataframe(chunk_df)
+
+            if SIMULATION_STATE["attack_mode"] and not full_result_df.empty:
+                full_result_df = full_result_df.copy()
+                display_result_df = display_result_df.copy()
+
+                full_result_df["predicted_class"] = "dos"
+                full_result_df["confidence"] = 96.45
+                full_result_df["threat_status"] = "Threat"
+
+                display_result_df["predicted_class"] = "dos"
+                display_result_df["confidence"] = 96.45
+                display_result_df["threat_status"] = "Threat"
+
+            total_logs = len(full_result_df)
+            total_threats = int((full_result_df["threat_status"] == "Threat").sum())
+            total_safe = int((full_result_df["threat_status"] == "Normal").sum())
+
+            alerts = build_alerts(full_result_df)
+
+            threat_df = full_result_df[full_result_df["threat_status"] == "Threat"]
+            top_attack = threat_df["predicted_class"].value_counts().idxmax() if not threat_df.empty else "normal"
+
             return jsonify({
                 "time": time.strftime("%H:%M:%S"),
                 "mode": "simulation",
-                "alerts": [],
-                "rows": [],
-                "total_logs": 0,
-                "total_threats": 0,
-                "total_safe": 0,
-                "top_attack": "No data",
-                "status_message": "Upload a dataset to use live simulation"
+                "alerts": alerts,
+                "rows": display_result_df.to_dict(orient="records"),
+                "total_logs": total_logs,
+                "total_threats": total_threats,
+                "total_safe": total_safe,
+                "top_attack": top_attack,
+                "status_message": "Demo attack simulation active" if SIMULATION_STATE["attack_mode"] else "Using uploaded data (live simulation)"
             })
-
-        df = pd.read_csv(file_path, low_memory=False)
-
-        start = LIVE_STATE.get("cursor", 0)
-        chunk_size = LIVE_STATE.get("chunk_size", 20)
-        end = start + chunk_size
-
-        chunk_df = df.iloc[start:end].copy()
-
-        if chunk_df.empty:
-            LIVE_STATE["cursor"] = 0
-            chunk_df = df.iloc[0:chunk_size].copy()
-            end = chunk_size
-
-        LIVE_STATE["cursor"] = end
-
-        full_result_df, display_result_df = predict_dataframe(chunk_df)
-
-        if SIMULATION_STATE["attack_mode"] and not full_result_df.empty:
-            full_result_df = full_result_df.copy()
-            display_result_df = display_result_df.copy()
-
-            full_result_df["predicted_class"] = "dos"
-            full_result_df["confidence"] = 96.45
-            full_result_df["threat_status"] = "Threat"
-
-            display_result_df["predicted_class"] = "dos"
-            display_result_df["confidence"] = 96.45
-            display_result_df["threat_status"] = "Threat"
-
-        total_logs = len(full_result_df)
-        total_threats = int((full_result_df["threat_status"] == "Threat").sum())
-        total_safe = int((full_result_df["threat_status"] == "Normal").sum())
-
-        alerts = build_alerts(full_result_df)
-
-        threat_df = full_result_df[full_result_df["threat_status"] == "Threat"]
-        top_attack = threat_df["predicted_class"].value_counts().idxmax() if not threat_df.empty else "normal"
 
         return jsonify({
             "time": time.strftime("%H:%M:%S"),
-            "mode": "simulation",
-            "alerts": alerts,
-            "rows": display_result_df.to_dict(orient="records"),
-            "total_logs": total_logs,
-            "total_threats": total_threats,
-            "total_safe": total_safe,
-            "top_attack": top_attack,
-            "status_message": "Demo attack simulation active" if SIMULATION_STATE["attack_mode"] else "Using uploaded data (live simulation)"
+            "mode": "none",
+            "alerts": [],
+            "rows": [],
+            "total_logs": 0,
+            "total_threats": 0,
+            "total_safe": 0,
+            "top_attack": "No data",
+            "status_message": "No live packets and no uploaded file available"
         })
 
     except Exception as e:
@@ -578,7 +643,6 @@ def download_csv():
     if not file_path or not os.path.exists(file_path):
         flash("Prediction CSV not found. Upload and analyze dataset first.")
         return redirect(url_for("upload"))
-
     return send_file(file_path, as_attachment=True)
 
 
